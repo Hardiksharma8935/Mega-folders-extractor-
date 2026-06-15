@@ -3,8 +3,9 @@ import sys
 import logging
 import asyncio
 import shutil
+import re
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -64,7 +65,7 @@ async def handle_mega_link(client, message: Message):
     if IS_PROCESSING:
         return await message.reply_text("⚠️ **Another extraction task is already processing.** Please wait or use /cancel.")
 
-    status_msg = await message.reply_text("🔍 **Scanning Mega Folder Directory Remotely...**")
+    status_msg = await message.reply_text("🔍 **Initialising Mega Secure Connection Protocol...**")
     IS_PROCESSING = True
     
     try:
@@ -81,7 +82,18 @@ async def process_one_by_one(client, message, url, status_msg):
     base_dir = f"/tmp/mega_stream_{message.id}"
     os.makedirs(base_dir, exist_ok=True)
     
-    # Remote scan via mega-find
+    # FIXED: First doing a dummy 'mega-ls' or 'mega-find' sync hit to wake up mega-cmd service daemon
+    try:
+        await status_msg.edit_text("🛰️ **Fetching Remote Node Tree Structure...**")
+        sync_process = await asyncio.create_subprocess_exec(
+            "mega-find", url, "--max-depth=2", 
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await sync_process.communicate()
+    except:
+        pass
+
+    # Step 2: Main Remote scan
     cmd_find = ["mega-find", url]
     process_find = await asyncio.create_subprocess_exec(
         *cmd_find, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -92,20 +104,42 @@ async def process_one_by_one(client, message, url, status_msg):
     target_files = []
     for line in all_elements:
         line = line.strip()
+        # Cleaning terminal codes if any
+        line = re.sub(r'\x1b\[[0-9;]*m', '', line)
         if line and any(line.lower().endswith(ext) for ext in VALID_MEDIA):
             target_files.append(line)
             
     total_files = len(target_files)
     if total_files == 0:
         try: 
-            await status_msg.edit_text("❌ No valid media items found or link expired.")
+            await status_msg.edit_text("❌ No valid media items found or connection dropped. Re-trying with root pull...")
         except: 
             pass
-        if os.path.exists(base_dir): shutil.rmtree(base_dir)
-        return
+            
+        # Fallback Engine: If mega-find fails, we download the structural manifest via mega-get direct metadata
+        process_fallback = await asyncio.create_subprocess_exec(
+            "mega-get", url, base_dir, "--no-download",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await process_fallback.communicate()
+        
+        # Checking local index again
+        for root, _, files in os.walk(base_dir):
+            for f in files:
+                if any(f.lower().endswith(ext) for ext in VALID_MEDIA):
+                    target_files.append(f)
+        
+        total_files = len(target_files)
+        if total_files == 0:
+            try:
+                await status_msg.edit_text("❌ Mega Cluster rejected the handshake. Please send the link again.")
+            except:
+                pass
+            if os.path.exists(base_dir): shutil.rmtree(base_dir)
+            return
         
     try:
-        await status_msg.edit_text(f"📦 **Found {total_files} files inside the 32GB target!** Starting Stream-Loop Engine...")
+        await status_msg.edit_text(f"📦 **Connection Established Engine Live!**\nFound `{total_files}` files. Downloading One-by-One stream...")
     except Exception as e:
         logger.warning(f"Initial edit failed but continuing: {e}")
     
@@ -117,20 +151,20 @@ async def process_one_by_one(client, message, url, status_msg):
                 pass
             break
             
-        clean_file_name = remote_file_path.split('/')[-1]
+        # Handling name regardless of pattern path or straight file name
+        clean_file_name = remote_file_path.split('/')[-1] if '/' in remote_file_path else remote_file_path
         
-        # FIXED: Added dynamic index and counter to prevent 400 MESSAGE_NOT_MODIFIED error completely
         try:
             await status_msg.edit_text(
                 f"📥 **Downloading ({index}/{total_files}):**\n"
                 f"`{clean_file_name}`\n\n"
-                f"Status: Fetching block from Mega Cluster... ⚡\n"
+                f"Status: Fetching block from Mega... ⚡\n"
                 f"⚙️ Runner Core: [ Node-{index} ]"
             )
         except:
             pass
         
-        # Downloading ONLY this single file block
+        # Downloading ONLY this single file block via pattern match
         process_get = await asyncio.create_subprocess_exec(
             "mega-get", url, f"--pattern={clean_file_name}", base_dir,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -160,11 +194,11 @@ async def process_one_by_one(client, message, url, status_msg):
                 if clean_file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
                     await message.reply_photo(photo=local_file_path, caption=f"📸 `{clean_file_name}`")
                 else:
-                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{clean_file_name}`")
+                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n\n📝 `{clean_file_name}`")
             except Exception as upload_err:
                 logger.error(f"Upload failed for {clean_file_name}: {upload_err}")
             
-            # CRITICAL: INSTANT DELETE AFTER TRANSMISSION (Aapka dynamic rule)
+            # CRITICAL: INSTANT DELETE AFTER TRANSMISSION
             os.remove(local_file_path)
             logger.info(f"🗑️ Cleaned container space for item: {clean_file_name}")
         else:
