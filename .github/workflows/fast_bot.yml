@@ -3,7 +3,7 @@ name: Super Fast Mega Extractor
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Isse aapko GitHub par ek button milega jise daba kar aap bot start/stop kar sakte hain
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -17,14 +17,14 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install MEGA-CMD (Official)
+    - name: Install MEGA-CMD (Official Stable)
       run: |
         sudo apt-get update
         sudo apt-get install -y curl libc6 libglib2.0-0 libicu-dev libssl-dev
         curl -o megacmd.deb https://mega.nz/linux/repo/Debian_11/amd64/megacmd-Debian_11_amd64.deb
         sudo apt-get install -y ./megacmd.deb
 
-    - name: Install Dependencies
+    - name: Install Pyrogram & Crypto Core
       run: |
         pip install --no-cache-dir pyrogram tgcrypto
 
