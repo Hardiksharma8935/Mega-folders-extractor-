@@ -6,7 +6,7 @@ import shutil
 import time
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,17 +16,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- SAFE ENVIRONMENT LOADING ---
-# Agar variable khali hoga to yeh crash nahi karega, balki log me batayega
 API_ID_ENV = os.environ.get("API_ID", "").strip()
 API_ID = int(API_ID_ENV) if API_ID_ENV.isdigit() else 0
 API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0").strip() or 0)
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "").strip()
+CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "").strip().replace("@", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    logger.critical("❌ CRITICAL ERROR: API_ID, API_HASH, or BOT_TOKEN is missing or invalid in Environment Variables!")
+    logger.critical("❌ CRITICAL ERROR: API_ID, API_HASH, or BOT_TOKEN is missing!")
     sys.exit(1)
 
 bot = Client("MegaDockerExtractor", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -38,11 +37,17 @@ VALID_MEDIA = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.jpg', '.jpeg',
 CURRENT_PROCESS = {}
 
 async def check_force_join(client, user_id):
-    if not CHANNEL_USERNAME: return True
+    if not CHANNEL_USERNAME: 
+        return True
     try:
         member = await client.get_chat_member(CHANNEL_USERNAME, user_id)
-        if member.status in ["member", "administrator", "creator"]: return True
-    except UserNotParticipant: return False
+        if member.status in ["member", "administrator", "creator"]: 
+            return True
+    except UserNotParticipant: 
+        return False
+    except ChatAdminRequired:
+        logger.warning(f"❌ BOT IS NOT ADMIN IN CHANNEL @{CHANNEL_USERNAME}! Bypassing restriction to avoid crash.")
+        return True  # Agar bot admin nahi hai to filter bypass ho jayega taaki user fas na jaye
     except Exception as e:
         logger.error(f"Force Join Error: {e}")
         return True
@@ -60,6 +65,8 @@ def human_size(size_bytes):
 @bot.on_message(filters.command("start"))
 async def start_command(client, message: Message):
     user_id = message.from_user.id
+    
+    # 1. Force Join Check
     if not await check_force_join(client, user_id):
         return await message.reply_text(
             f"❌ **Access Denied!**\n\nYou must join our channel to use this bot.",
@@ -67,17 +74,24 @@ async def start_command(client, message: Message):
                 InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")
             ]])
         )
+        
+    # 2. Admin Approval Check
     if user_id not in APPROVED_USERS:
-        await client.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🔔 **New Request!**\n👤 Name: {message.from_user.first_name}\n🆔 ID: `{user_id}`",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
-            ]])
-        )
-        return await message.reply_text("⏳ Your request sent to Admin. Please wait.")
-    await message.reply_text("🎬 **Mega Advanced Extractor Live!**\nSend me a Mega link.")
+        try:
+            await client.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🔔 **New Request!**\n👤 Name: {message.from_user.first_name}\n🆔 ID: `{user_id}`\n🌐 Username: @{message.from_user.username}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
+                ]])
+            )
+            return await message.reply_text("⏳ **Your request has been sent to the Admin.**\nPlease wait for approval.")
+        except PeerIdInvalid:
+            logger.error(f"❌ INVALID ADMIN_ID ({ADMIN_ID})! Bot cannot send requests to this ID.")
+            return await message.reply_text("❌ **Bot Setup Error:** Admin ID configured in Railway is invalid. Please contact owner.")
+
+    await message.reply_text("🎬 **Mega Advanced Extractor Live!**\n\nSend me a Mega folder link, and I will extract it sequentially.")
 
 @bot.on_message(filters.command("cancel"))
 async def cancel_command(client, message: Message):
@@ -92,11 +106,13 @@ async def cancel_command(client, message: Message):
 async def admin_callback(client, callback_query):
     action, user_id = callback_query.data.split("_")
     user_id = int(user_id)
-    if callback_query.from_user.id != ADMIN_ID: return
+    if callback_query.from_user.id != ADMIN_ID: 
+        return await callback_query.answer("You are not the Admin!", show_alert=True)
+        
     if action == "approve":
         APPROVED_USERS.add(user_id)
         await callback_query.edit_message_text(f"✅ User `{user_id}` approved!")
-        try: await client.send_message(user_id, "🎉 Approved! You can use the bot now.")
+        try: await client.send_message(user_id, "🎉 **Congratulations!** Your request is approved. You can use the bot now!")
         except: pass
     else:
         await callback_query.edit_message_text(f"❌ User `{user_id}` rejected.")
@@ -108,7 +124,8 @@ async def handle_link(client, message: Message):
     if "mega.nz" not in url: return
     if not await check_force_join(client, user_id): return
     if user_id not in APPROVED_USERS: return
-    status_msg = await message.reply_text("📝 Added to Queue. Please wait...")
+    
+    status_msg = await message.reply_text("📝 **Added to Queue.** Processing your request soon...")
     await download_queue.put((client, message, url, status_msg))
 
 async def queue_worker():
@@ -126,7 +143,6 @@ async def process_mega_link(client, message, url, status_msg):
     user_id = message.from_user.id
     CURRENT_PROCESS[user_id] = False
     
-    # RAILWAY CRASH FIX: /tmp folder uses virtual RAM memory to prevent disk crash
     download_dir = f"/tmp/download_{message.id}"
     os.makedirs(download_dir, exist_ok=True)
     
@@ -154,7 +170,7 @@ async def process_mega_link(client, message, url, status_msg):
             speed = total_size / elapsed if elapsed > 0 else 0
             try:
                 await status_msg.edit_text(
-                    f"📥 **Downloading...**\n📂 Files: {file_count}\n📦 Size: {human_size(total_size)}\n⚡ Speed: {human_size(speed)}/s"
+                    f"📥 **Downloading...**\n📂 Files Found: {file_count}\n📦 Size: {human_size(total_size)}\n⚡ Speed: {human_size(speed)}/s"
                 )
             except: pass
             await asyncio.sleep(5)
@@ -194,13 +210,8 @@ async def process_mega_link(client, message, url, status_msg):
         if os.path.exists(download_dir): shutil.rmtree(download_dir)
         CURRENT_PROCESS.pop(user_id, None)
 
-# --- FIX FOR RAILWAY DOUBLE INITIALIZATION CRASH ---
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    
-    # Pehle background task loop ready karenge
     loop.create_task(queue_worker())
-    
     logger.info("🤖 Starting Pyrogram Client Safely...")
-    # Phir bot ko idle mode me run karenge jo Railway ke liye custom main loop handle karta hai
     bot.run()
