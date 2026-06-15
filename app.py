@@ -3,9 +3,10 @@ import sys
 import logging
 import asyncio
 import shutil
-import re
+from mega import Mega
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -15,61 +16,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- ENVIRONMENT VARIABLES ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    logger.critical("❌ CRITICAL ERROR: Variables missing in GitHub Secrets!")
+    logger.critical("❌ Variables missing in GitHub Secrets!")
     sys.exit(1)
 
 bot = Client("MegaFastExtractor", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
 IS_PROCESSING = False
 CURRENT_PROCESS = {}
 VALID_MEDIA = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.jpg', '.jpeg', '.png')
 
 @bot.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.reply_text("❌ Access Denied. Only Admin can use this high-speed bot.")
-    await message.reply_text(
-        "🎬 **GitHub Actions Super-Fast Extractor Live!**\n\n"
-        "Send me any big Mega link. I will process it one-by-one with maximum bandwidth!\n"
-        "🛑 Use **/cancel** to stop current download loop."
-    )
+    if message.from_user.id != ADMIN_ID: return
+    await message.reply_text("🎬 **GitHub Actions API-Linked Extractor Live!**\n\nSend me a Mega folder link.")
 
 @bot.on_message(filters.command("cancel"))
 async def cancel_command(client, message: Message):
-    user_id = message.from_user.id
-    if user_id == ADMIN_ID:
-        CURRENT_PROCESS[user_id] = True
-        await message.reply_text("🛑 **Stopping the active stream loop safely...**")
-    else:
-        await message.reply_text("ℹ️ No active task running.")
+    if message.from_user.id == ADMIN_ID:
+        CURRENT_PROCESS[message.from_user.id] = True
+        await message.reply_text("🛑 Stopping active loop...")
 
 @bot.on_message(filters.text & ~filters.command(["start", "cancel"]))
 async def handle_mega_link(client, message: Message):
     global IS_PROCESSING
-    user_id = message.from_user.id
-    
-    if user_id != ADMIN_ID:
-        return
-        
-    url = message.text.strip()
-    if "mega.nz" not in url:
-        return
-        
-    if IS_PROCESSING:
-        return await message.reply_text("⚠️ **Another extraction task is already processing.** Please wait or use /cancel.")
+    if message.from_user.id != ADMIN_ID or "mega.nz" not in message.text: return
+    if IS_PROCESSING: return await message.reply_text("⚠️ Wait for current task or /cancel.")
 
-    status_msg = await message.reply_text("🔍 **Initialising Mega Secure Connection Protocol...**")
+    status_msg = await message.reply_text("🔍 **Parsing Mega Folder via API Node...**")
     IS_PROCESSING = True
-    
     try:
-        await process_one_by_one(client, message, url, status_msg)
+        await process_one_by_one(client, message, message.text.strip(), status_msg)
     except Exception as e:
         logger.error(f"Global Error: {e}")
     finally:
@@ -78,140 +59,76 @@ async def handle_mega_link(client, message: Message):
 async def process_one_by_one(client, message, url, status_msg):
     user_id = message.from_user.id
     CURRENT_PROCESS[user_id] = False
-    
     base_dir = f"/tmp/mega_stream_{message.id}"
     os.makedirs(base_dir, exist_ok=True)
     
-    # FIXED: First doing a dummy 'mega-ls' or 'mega-find' sync hit to wake up mega-cmd service daemon
+    # Using mega.py API to extract folder names instantly without daemon bugs
     try:
-        await status_msg.edit_text("🛰️ **Fetching Remote Node Tree Structure...**")
-        sync_process = await asyncio.create_subprocess_exec(
-            "mega-find", url, "--max-depth=2", 
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await sync_process.communicate()
-    except:
-        pass
+        mega_api = Mega()
+        folder_nodes = mega_api.parse_url(url)
+        # Handle if it's a single file link or folder
+        files_data = folder_nodes.get('f', []) if isinstance(folder_nodes, dict) else []
+        
+        target_files = []
+        if files_data:
+            for node in files_data:
+                name = node.get('a', {}).get('n', '')
+                if name and any(name.lower().endswith(ext) for ext in VALID_MEDIA):
+                    target_files.append(name)
+        else:
+            # Fallback if single file link
+            single_name = folder_nodes.get('a', {}).get('n', '') if isinstance(folder_nodes, dict) else ''
+            if single_name: target_files.append(single_name)
 
-    # Step 2: Main Remote scan
-    cmd_find = ["mega-find", url]
-    process_find = await asyncio.create_subprocess_exec(
-        *cmd_find, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await process_find.communicate()
-    all_elements = stdout.decode('utf-8', errors='ignore').split('\n')
-    
-    target_files = []
-    for line in all_elements:
-        line = line.strip()
-        # Cleaning terminal codes if any
-        line = re.sub(r'\x1b\[[0-9;]*m', '', line)
-        if line and any(line.lower().endswith(ext) for ext in VALID_MEDIA):
-            target_files.append(line)
-            
-    total_files = len(target_files)
-    if total_files == 0:
-        try: 
-            await status_msg.edit_text("❌ No valid media items found or connection dropped. Re-trying with root pull...")
-        except: 
-            pass
-            
-        # Fallback Engine: If mega-find fails, we download the structural manifest via mega-get direct metadata
-        process_fallback = await asyncio.create_subprocess_exec(
-            "mega-get", url, base_dir, "--no-download",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await process_fallback.communicate()
-        
-        # Checking local index again
-        for root, _, files in os.walk(base_dir):
-            for f in files:
-                if any(f.lower().endswith(ext) for ext in VALID_MEDIA):
-                    target_files.append(f)
-        
         total_files = len(target_files)
         if total_files == 0:
-            try:
-                await status_msg.edit_text("❌ Mega Cluster rejected the handshake. Please send the link again.")
-            except:
-                pass
-            if os.path.exists(base_dir): shutil.rmtree(base_dir)
+            await status_msg.edit_text("❌ No valid media items found or link is private/empty.")
             return
-        
-    try:
-        await status_msg.edit_text(f"📦 **Connection Established Engine Live!**\nFound `{total_files}` files. Downloading One-by-One stream...")
-    except Exception as e:
-        logger.warning(f"Initial edit failed but continuing: {e}")
-    
-    for index, remote_file_path in enumerate(target_files, start=1):
-        if CURRENT_PROCESS.get(user_id, False):
-            try: 
-                await status_msg.edit_text("🛑 **Process cancelled by user. Workspace cleared.**")
-            except: 
-                pass
-            break
-            
-        # Handling name regardless of pattern path or straight file name
-        clean_file_name = remote_file_path.split('/')[-1] if '/' in remote_file_path else remote_file_path
-        
-        try:
+
+        await status_msg.edit_text(f"📦 **API Handshake Connected!**\nFound `{total_files}` files. Streaming started...")
+
+        for index, clean_file_name in enumerate(target_files, start=1):
+            if CURRENT_PROCESS.get(user_id, False):
+                await status_msg.edit_text("🛑 Process cancelled by user.")
+                break
+
             await status_msg.edit_text(
-                f"📥 **Downloading ({index}/{total_files}):**\n"
-                f"`{clean_file_name}`\n\n"
-                f"Status: Fetching block from Mega... ⚡\n"
-                f"⚙️ Runner Core: [ Node-{index} ]"
+                f"📥 **Downloading ({index}/{total_files}):**\n`{clean_file_name}`\n\n"
+                f"Status: Downloading block via Mega Engine..."
             )
-        except:
-            pass
-        
-        # Downloading ONLY this single file block via pattern match
-        process_get = await asyncio.create_subprocess_exec(
-            "mega-get", url, f"--pattern={clean_file_name}", base_dir,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await process_get.communicate()
-        
-        local_file_path = None
-        for root, _, files in os.walk(base_dir):
-            for f in files:
-                if f == clean_file_name:
-                    local_file_path = os.path.join(root, f)
-                    break
-        
-        if local_file_path and os.path.exists(local_file_path):
-            try:
-                await status_msg.edit_text(
-                    f"📤 **Uploading ({index}/{total_files}):**\n"
-                    f"`{clean_file_name}`\n\n"
-                    f"Status: Injecting file into Telegram Network...\n"
-                    f"⚙️ Runner Core: [ Node-{index} ]"
-                )
-            except:
-                pass
-            
-            # Send file to chat securely
-            try:
+
+            # Retry mechanism for mega-get to survive daemon wakeups
+            process_get = await asyncio.create_subprocess_exec(
+                "mega-get", url, f"--pattern={clean_file_name}", base_dir,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await process_get.communicate()
+
+            local_file_path = None
+            for root, _, files in os.walk(base_dir):
+                for f in files:
+                    if f == clean_file_name:
+                        local_file_path = os.path.join(root, f)
+                        break
+
+            if local_file_path and os.path.exists(local_file_path):
+                await status_msg.edit_text(f"📤 **Uploading ({index}/{total_files}):**\n`{clean_file_name}`")
+                
                 if clean_file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
                     await message.reply_photo(photo=local_file_path, caption=f"📸 `{clean_file_name}`")
                 else:
                     await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n\n📝 `{clean_file_name}`")
-            except Exception as upload_err:
-                logger.error(f"Upload failed for {clean_file_name}: {upload_err}")
-            
-            # CRITICAL: INSTANT DELETE AFTER TRANSMISSION
-            os.remove(local_file_path)
-            logger.info(f"🗑️ Cleaned container space for item: {clean_file_name}")
-        else:
-            logger.warning(f"Skipped or couldn't fetch item: {clean_file_name}")
-            
-    try: 
-        await status_msg.edit_text("✅ **All files extracted and processed successfully sequentially!** GitHub Runner space flushed.")
-    except: 
-        pass
-        
-    if os.path.exists(base_dir): 
-        shutil.rmtree(base_dir)
+                
+                os.remove(local_file_path)
+            else:
+                logger.warning(f"Could not download: {clean_file_name}")
+
+        await status_msg.edit_text("✅ **All files processed successfully!** Workspace cleared.")
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Handshake Error: {str(e)}")
+    finally:
+        if os.path.exists(base_dir): shutil.rmtree(base_dir)
 
 if __name__ == "__main__":
     bot.run()
-    
