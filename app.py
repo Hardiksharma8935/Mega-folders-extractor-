@@ -268,9 +268,14 @@ async def process_mega_link(client, message, url, status_msg):
             shutil.rmtree(download_dir)
         CURRENT_PROCESS.pop(user_id, None)
 
-# --- START BOT & BACKGROUND TASK ---
+## --- START BOT & BACKGROUND TASK (FIXED FOR RAILWAY) ---
 if __name__ == "__main__":
+    # Hum bot ko start karne ke baad background task ko fire karenge
+    # Isse "run.py" wala double-initialization error permanent khatam ho jayega
+    bot.start()
+    
     loop = asyncio.get_event_loop()
-    loop.create_task(queue_worker()) # Start queue processing in background
-    bot.run()
-      
+    loop.create_task(queue_worker())
+    
+    logger.info("🤖 Bot is successfully running and listening for events...")
+    bot.idle() # Bot ko active rakhne ke liye idle use karenge, run() nahi
