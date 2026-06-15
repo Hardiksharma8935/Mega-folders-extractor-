@@ -24,9 +24,9 @@ jobs:
         curl -o megacmd.deb https://mega.nz/linux/repo/Debian_11/amd64/megacmd-Debian_11_amd64.deb
         sudo apt-get install -y ./megacmd.deb
 
-    - name: Install Pyrogram & Crypto Core
+    - name: Install Dependencies
       run: |
-        pip install --no-cache-dir pyrogram tgcrypto
+        pip install --no-cache-dir pyrogram tgcrypto mega.py tenacity
 
     - name: Run Bot Server
       env:
