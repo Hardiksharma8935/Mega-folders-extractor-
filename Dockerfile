@@ -1,5 +1,9 @@
 FROM python:3.10-slim
 
+# Railway me memory limits ke liye environment optimization
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 RUN apt-get update && apt-get install -y \
     curl \
     libc6 \
@@ -9,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Direct official stable MEGA-CMD installer
+# MEGA-CMD installation 
 RUN curl -o megacmd.deb https://mega.nz/linux/repo/Debian_11/amd64/megacmd-Debian_11_amd64.deb \
     && apt-get update \
     && apt-get install -y ./megacmd.deb \
@@ -19,7 +23,7 @@ RUN curl -o megacmd.deb https://mega.nz/linux/repo/Debian_11/amd64/megacmd-Debia
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt 
 
 COPY . .
 
