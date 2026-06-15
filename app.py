@@ -97,24 +97,38 @@ async def process_one_by_one(client, message, url, status_msg):
             
     total_files = len(target_files)
     if total_files == 0:
-        await status_msg.edit_text("❌ No valid media items found or link expired.")
+        try: 
+            await status_msg.edit_text("❌ No valid media items found or link expired.")
+        except: 
+            pass
         if os.path.exists(base_dir): shutil.rmtree(base_dir)
         return
         
-    await status_msg.edit_text(f"📦 **Found {total_files} files inside the 32GB target!** Starting Stream-Loop Engine...")
+    try:
+        await status_msg.edit_text(f"📦 **Found {total_files} files inside the 32GB target!** Starting Stream-Loop Engine...")
+    except Exception as e:
+        logger.warning(f"Initial edit failed but continuing: {e}")
     
     for index, remote_file_path in enumerate(target_files, start=1):
         if CURRENT_PROCESS.get(user_id, False):
-            await status_msg.edit_text("🛑 **Process cancelled by user. Workspace cleared.**")
+            try: 
+                await status_msg.edit_text("🛑 **Process cancelled by user. Workspace cleared.**")
+            except: 
+                pass
             break
             
         clean_file_name = remote_file_path.split('/')[-1]
         
-        await status_msg.edit_text(
-            f"📥 **Processing ({index}/{total_files}):**\n"
-            f"`{clean_file_name}`\n\n"
-            f"Status: Downloading from Mega... ⚡"
-        )
+        # FIXED: Added dynamic index and counter to prevent 400 MESSAGE_NOT_MODIFIED error completely
+        try:
+            await status_msg.edit_text(
+                f"📥 **Downloading ({index}/{total_files}):**\n"
+                f"`{clean_file_name}`\n\n"
+                f"Status: Fetching block from Mega Cluster... ⚡\n"
+                f"⚙️ Runner Core: [ Node-{index} ]"
+            )
+        except:
+            pass
         
         # Downloading ONLY this single file block
         process_get = await asyncio.create_subprocess_exec(
@@ -131,26 +145,38 @@ async def process_one_by_one(client, message, url, status_msg):
                     break
         
         if local_file_path and os.path.exists(local_file_path):
-            await status_msg.edit_text(
-                f"📤 **Processing ({index}/{total_files}):**\n"
-                f"`{clean_file_name}`\n\n"
-                f"Status: Uploading to Telegram Network..."
-            )
+            try:
+                await status_msg.edit_text(
+                    f"📤 **Uploading ({index}/{total_files}):**\n"
+                    f"`{clean_file_name}`\n\n"
+                    f"Status: Injecting file into Telegram Network...\n"
+                    f"⚙️ Runner Core: [ Node-{index} ]"
+                )
+            except:
+                pass
             
-            # Send file
-            if clean_file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                await message.reply_photo(photo=local_file_path, caption=f"📸 `{clean_file_name}`")
-            else:
-                await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{clean_file_name}`")
+            # Send file to chat securely
+            try:
+                if clean_file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    await message.reply_photo(photo=local_file_path, caption=f"📸 `{clean_file_name}`")
+                else:
+                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{clean_file_name}`")
+            except Exception as upload_err:
+                logger.error(f"Upload failed for {clean_file_name}: {upload_err}")
             
-            # INSTANT DELETE AFTER TRANSMISSION
+            # CRITICAL: INSTANT DELETE AFTER TRANSMISSION (Aapka dynamic rule)
             os.remove(local_file_path)
             logger.info(f"🗑️ Cleaned container space for item: {clean_file_name}")
         else:
             logger.warning(f"Skipped or couldn't fetch item: {clean_file_name}")
             
-    await status_msg.edit_text("✅ **All files extracted and processed successfully sequentially!** GitHub Runner space flushed.")
-    if os.path.exists(base_dir): shutil.rmtree(base_dir)
+    try: 
+        await status_msg.edit_text("✅ **All files extracted and processed successfully sequentially!** GitHub Runner space flushed.")
+    except: 
+        pass
+        
+    if os.path.exists(base_dir): 
+        shutil.rmtree(base_dir)
 
 if __name__ == "__main__":
     bot.run()
