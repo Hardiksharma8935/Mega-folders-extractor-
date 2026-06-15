@@ -1,0 +1,38 @@
+name: Super Fast Mega Extractor
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Isse aapko GitHub par ek button milega jise daba kar aap bot start/stop kar sakte hain
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install MEGA-CMD (Official)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl libc6 libglib2.0-0 libicu-dev libssl-dev
+        curl -o megacmd.deb https://mega.nz/linux/repo/Debian_11/amd64/megacmd-Debian_11_amd64.deb
+        sudo apt-get install -y ./megacmd.deb
+
+    - name: Install Dependencies
+      run: |
+        pip install --no-cache-dir pyrogram tgcrypto
+
+    - name: Run Bot Server
+      env:
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      run: python app.py
+      
