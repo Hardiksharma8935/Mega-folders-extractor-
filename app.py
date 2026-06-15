@@ -165,7 +165,7 @@ async def process_mega_link(client, message, url, status_msg):
     user_id = message.from_user.id
     CURRENT_PROCESS[user_id] = False
     
-    download_dir = f"/app/download_{message.id}"
+    download_dir = f"/tmp/download_{message.id}"
     os.makedirs(download_dir, exist_ok=True)
     
     await status_msg.edit_text("🔍 **Connecting to Mega Secure Engine...**")
