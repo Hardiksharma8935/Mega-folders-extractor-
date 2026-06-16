@@ -4,6 +4,7 @@ import logging
 import asyncio
 import shutil
 import random
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -41,8 +42,8 @@ async def safe_edit(message: Message, text: str):
 async def start_command(client, message: Message):
     if message.from_user.id != ADMIN_ID: return
     await message.reply_text(
-        "🎬 **GitHub Actions Megatools Core Live!**\n\n"
-        "Send me any big Mega folder link. I will process it one-by-one safely!\n"
+        "🎬 **GitHub Actions Megatools Hybrid Engine Live!**\n\n"
+        "Send me any Mega Folder Link or Single File Link. I will download it instantly!\n"
         "🛑 Use **/cancel** to stop current download loop."
     )
 
@@ -59,13 +60,18 @@ async def handle_mega_link(client, message: Message):
     user_id = message.from_user.id
     
     if user_id != ADMIN_ID: return
-    url = message.text.strip()
-    if "mega.nz" not in url: return
+    
+    # Extract clean URL (removes extra text/spaces)
+    urls = re.findall(r'(https?://mega\.nz/[^\s]+)', message.text)
+    if not urls:
+        return await message.reply_text("❌ No valid mega.nz link found in your message.")
+        
+    url = urls[0].strip()
         
     if IS_PROCESSING:
         return await message.reply_text("⚠️ **Another task is running.** Please wait or use /cancel.")
 
-    status_msg = await message.reply_text("⚡ **Connecting via Megatools Bridge Engine...**")
+    status_msg = await message.reply_text("⚡ **Analyzing Link Type (Folder/File)...**")
     IS_PROCESSING = True
     
     try:
@@ -82,39 +88,49 @@ async def process_one_by_one(client, message, url, status_msg):
     base_dir = f"/tmp/mega_stream_{message.id}"
     os.makedirs(base_dir, exist_ok=True)
     
+    target_files = []
+    is_folder = False
+
+    # Check if it's a folder or file link
+    if "/folder/" in url or "/#" in url and not url.count("/") == 4:
+        is_folder = True
+
     await safe_edit(status_msg, "🔍 **Streaming Mega Structure Tree Data...**")
     
-    # megatools directly fetches directory items using 'megals' command
-    cmd_find = ["megals", "--export", url]
-    process_find = await asyncio.create_subprocess_exec(
-        *cmd_find, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await process_find.communicate()
-    all_elements = stdout.decode('utf-8', errors='ignore').split('\n')
-    
-    target_files = []
-    for line in all_elements:
-        line = line.strip()
-        if line and any(line.lower().endswith(ext) for ext in VALID_MEDIA):
-            # Extract only the exact export name/URL code pattern
-            target_files.append(line)
+    if is_folder:
+        # Folder processing
+        cmd_find = ["megals", "--export", url]
+        process_find = await asyncio.create_subprocess_exec(
+            *cmd_find, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await process_find.communicate()
+        all_elements = stdout.decode('utf-8', errors='ignore').split('\n')
+        
+        for line in all_elements:
+            line = line.strip()
+            if line and any(line.lower().endswith(ext) for ext in VALID_MEDIA):
+                target_files.append(line)
+    else:
+        # Single File processing directly
+        target_files.append(url)
             
     total_files = len(target_files)
     if total_files == 0:
-        await safe_edit(status_msg, "❌ **No supported files found or link is invalid.**")
+        await safe_edit(status_msg, "❌ **No supported files found or link format is unsupported.**")
         if os.path.exists(base_dir): shutil.rmtree(base_dir)
         return
         
-    await safe_edit(status_msg, f"📦 **Handshake Successful!**\nFound `{total_files}` items. Initializing Sequence Upload...")
+    await safe_edit(status_msg, f"📦 **Link Parsed Successfully!**\nFound `{total_files}` items. Initializing Sequence Download...")
     
     for index, remote_file_path in enumerate(target_files, start=1):
         if CURRENT_PROCESS.get(user_id, False):
             await safe_edit(status_msg, "🛑 **Process cancelled by user.**")
             break
             
-        # Extract name for status
         clean_file_name = remote_file_path.split('/')[-1] if '/' in remote_file_path else f"File_{index}"
-        
+        if len(clean_file_name) > 60:  # If it's a raw URL link instead of exported path
+            clean_file_name = f"Media_File_{index}"
+
         await safe_edit(
             status_msg,
             f"📥 **Downloading ({index}/{total_files}):**\n"
@@ -122,7 +138,7 @@ async def process_one_by_one(client, message, url, status_msg):
             f"Status: Fetching block from Mega Cloud... ⚡"
         )
         
-        # megadl will download this item safely into our temporary folder
+        # Download action
         process_dl = await asyncio.create_subprocess_exec(
             "megadl", "--path", base_dir, remote_file_path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -130,29 +146,30 @@ async def process_one_by_one(client, message, url, status_msg):
         await process_dl.communicate()
         
         local_file_path = None
+        actual_name = clean_file_name
         for root, _, files in os.walk(base_dir):
             for f in files:
                 local_file_path = os.path.join(root, f)
-                clean_file_name = f
+                actual_name = f
                 break
         
         if local_file_path and os.path.exists(local_file_path):
             await safe_edit(
                 status_msg,
                 f"📤 **Uploading ({index}/{total_files}):**\n"
-                f"`{clean_file_name}`\n\n"
-                f"Status: Injecting file into Telegram Network Core..."
+                f"`{actual_name}`\n\n"
+                f"Status: Injecting file into Telegram Network..."
             )
             
             try:
-                if clean_file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    await message.reply_photo(photo=local_file_path, caption=f"📸 `{clean_file_name}`")
+                if actual_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    await message.reply_photo(photo=local_file_path, caption=f"📸 `{actual_name}`")
                 else:
-                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{clean_file_name}`")
+                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{actual_name}`")
             except Exception as upload_err:
                 logger.error(f"Upload failed: {upload_err}")
             
-            # INSTANT PURGE FROM CACHE
+            # Flush after single transmission
             os.remove(local_file_path)
         else:
             logger.warning(f"Skipped item index: {index}")
@@ -162,4 +179,4 @@ async def process_one_by_one(client, message, url, status_msg):
 
 if __name__ == "__main__":
     bot.run()
-        
+    
