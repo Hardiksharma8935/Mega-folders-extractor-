@@ -119,7 +119,7 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE):
             if bot_state["process"].returncode == 0:
                 await status_msg.edit_text("📂 Download complete! Uploading to Telegram...")
                 
-                # --- PHASE 2: UPLOAD (With Crash Protection) ---
+                # --- PHASE 2: UPLOAD (With Auto-Splitter) ---
                 for root, _, files in os.walk(download_dir):
                     for file in files:
                         if bot_state["is_cancelled"]: break
@@ -127,21 +127,48 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE):
                         file_path = os.path.join(root, file)
                         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                         
-                        # 50MB limit check (Ye bot ko 413 error se bachayega)
+                        # Agar file 50MB se badi hai, toh usko split karenge
                         if file_size_mb > 49.5: 
-                            await context.bot.send_message(chat_id=user_id, text=f"⚠️ Skipped `{file}`\n❌ Telegram bots 50MB se badi file nahi bhej sakte (Ye {file_size_mb:.1f}MB ki hai).")
-                            continue
+                            await status_msg.edit_text(f"✂️ `{file}` badi file hai ({file_size_mb:.1f}MB). 49MB ke parts me split kar raha hoon...")
                             
+                            chunk_size = 49 * 1024 * 1024 # 49MB exact
+                            part_num = 1
+                            
+                            with open(file_path, 'rb') as f:
+                                while True:
+                                    if bot_state["is_cancelled"]: break
+                                    
+                                    chunk = f.read(chunk_size)
+                                    if not chunk: break
+                                    
+                                    # File ko .001, .002 format me save karega
+                                    part_name_only = f"{file}.{part_num:03d}"
+                                    part_filename = os.path.join(root, part_name_only)
+                                    
+                                    with open(part_filename, 'wb') as part_file:
+                                        part_file.write(chunk)
+                                        
+                                    await status_msg.edit_text(f"📤 Uploading Part {part_num}: `{part_name_only}`")
+                                    
+                                    try:
+                                        with open(part_filename, 'rb') as doc:
+                                            await context.bot.send_document(chat_id=user_id, document=doc, read_timeout=120, write_timeout=120)
+                                    except Exception as e:
+                                        await context.bot.send_message(chat_id=user_id, text=f"❌ `{part_name_only}` me error: {str(e)}")
+                                        
+                                    os.remove(part_filename) # Part upload hone ke baad delete
+                                    part_num += 1
+                                    await asyncio.sleep(1)
+                            continue # Splitting khatam, ab next main file par jao
+                            
+                        # Agar file 50MB se choti hai, toh direct upload
                         await status_msg.edit_text(f"📤 Uploading: `{file}`")
-                        
-                        # Upload try-except block (Ye bot ko freeze hone se bachayega)
                         try:
                             with open(file_path, 'rb') as doc:
                                 await context.bot.send_document(chat_id=user_id, document=doc, read_timeout=120, write_timeout=120)
                         except Exception as e:
                             await context.bot.send_message(chat_id=user_id, text=f"❌ `{file}` bhejte waqt error aaya: {str(e)}")
                         
-                        # Server ko saans lene ka time do taaki doosre users ignore na hon
                         await asyncio.sleep(1) 
                         
                 if bot_state["is_cancelled"]:
@@ -155,16 +182,13 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text=f"💥 System Error: {str(global_err)}")
             
         finally:
-            # Ye block hamesha chalega chahe kuch bhi error ho (Preventing Freeze)
             bot_state["process"] = None
             shutil.rmtree(download_dir, ignore_errors=True)
             await asyncio.sleep(1)
             
-    # Jab queue khali ho jaye tabhi bot free hoga
     bot_state["is_processing"] = False 
 
 def main():
-    # Timeout limits aur badha diye hain heavy files ke liye
     request = HTTPXRequest(connect_timeout=60.0, read_timeout=180.0, write_timeout=180.0)
     application = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(True).build()
     
@@ -174,9 +198,8 @@ def main():
     application.add_handler(CallbackQueryHandler(button_click))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("Bot is running with Crash Protection v3...")
+    print("Bot is running with Auto-Splitter Jugad...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
-    
