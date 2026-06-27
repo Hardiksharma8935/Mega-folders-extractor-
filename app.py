@@ -1,8 +1,8 @@
 import os
 import asyncio
 import collections
-import re
-from mega import Mega
+import shutil
+import uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -13,9 +13,6 @@ approved_users = set([ADMIN_ID]) if ADMIN_ID else set()
 pending_approvals = {}
 extraction_queue = collections.deque()
 is_processing = False
-
-mega = Mega()
-m = mega.login()
 
 # --- Queue Processor ---
 async def process_queue(context: ContextTypes.DEFAULT_TYPE):
@@ -60,15 +57,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("approve_"):
         user_id = int(data.split("_")[1])
         approved_users.add(user_id)
-        
         await query.edit_message_text(text=f"✅ User `{user_id}` ko successfully approve kar diya gaya hai!")
-        
         if user_id in pending_approvals:
             try:
                 await context.bot.send_message(chat_id=user_id, text="🎉 Good News! Admin ne aapka request approve kar diya hai. Ab aap MEGA link bhej sakte hain.")
                 del pending_approvals[user_id]
-            except Exception as e:
-                print(f"Error alerting user: {e}")
+            except Exception:
+                pass
 
 # --- Message Handler ---
 async def handle_message(update: Update, update_context: ContextTypes.DEFAULT_TYPE):
@@ -88,81 +83,74 @@ async def handle_message(update: Update, update_context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text("⚠️ Please ek valid MEGA folder link bhejiye.")
 
-# --- Core Mega Extractor Logic (Fixed URL Parsing) ---
+# --- Naya Smart URL Fixer ---
+def format_mega_url(url: str) -> str:
+    url = url.strip()
+    # Naye /folder/ format ko purane format me badalta hai taaki megatools samajh sake
+    if '/folder/' in url and '#' in url:
+        parts = url.split('/folder/')[1].split('#')
+        return f"https://mega.nz/#F!{parts[0]}!{parts[1]}"
+    if '/file/' in url and '#' in url:
+        parts = url.split('/file/')[1].split('#')
+        return f"https://mega.nz/#!{parts[0]}!{parts[1]}"
+    return url
+
+# --- Core Mega Extractor Logic (Native Megatools) ---
 async def extract_mega_folder(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("🔍 Link parse kiya ja raha hai...")
+    status_msg = await update.message.reply_text("🔍 Link setup kiya ja raha hai...")
+    
+    clean_url = format_mega_url(url)
+    task_id = str(uuid.uuid4())
+    download_dir = f"./downloads/{task_id}"
+    os.makedirs(download_dir, exist_ok=True)
+    
     try:
-        loop = asyncio.get_running_loop()
+        await status_msg.edit_text("⏳ Server folder download kar raha hai... (Isme file ke size ke hisab se waqt lag sakta hai)")
         
-        # Safe URL processing to bypass 'Url key missing' error
-        # Agar URL me `#` se split hai toh folder id aur key ko custom handle karenge
-        processed_url = url
-        if "#" in url and "/folder/" in url:
-            # Standard structural formatting for mega.py library
-            processed_url = url.replace("#", "!")
-
-        await status_msg.edit_text("📂 Files list fetch ki ja rahi hai...")
+        # Railway ke asli Linux engine (megatools) ka istemal
+        process = await asyncio.create_subprocess_exec(
+            "megatools", "dl", "--path", download_dir, clean_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
         
-        # Public URL details read karne ka fail-safe system
-        try:
-            files = await loop.run_in_executor(None, m.get_files_from_link, processed_url)
-        except Exception:
-            # Backup method agar standard call fail ho jaye
-            public_node = await loop.run_in_executor(None, m.import_public_url, processed_url)
-            files = await loop.run_in_executor(None, m.get_files)
-
-        if not files:
-            await status_msg.edit_text("❌ Folder khali hai, encrypted hai ya URL sahi nahi hai.")
+        if process.returncode != 0:
+            err = stderr.decode().strip() or stdout.decode().strip()
+            await status_msg.edit_text(f"❌ Download failed: {err}")
             return
-
+        
+        await status_msg.edit_text("📂 Download complete! Ab ek-ek karke Telegram par bhej raha hoon...")
+        
+        # Supported formats
         media_exts = ('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.jpg', '.jpeg', '.png', '.pdf', '.zip')
-        
-        # Normalize files data dictionary/list filter
-        media_files = []
-        if isinstance(files, dict):
-            for f_id, f_data in files.items():
-                if isinstance(f_data, dict) and 'name' in f_data:
-                    if str(f_data['name']).lower().endswith(media_exts):
-                        media_files.append(f_data)
-                elif isinstance(f_data, dict) and 'n' in f_data:
-                    if str(f_data['n']).lower().endswith(media_exts):
-                        # standardizer mapping
-                        f_data['name'] = f_data['n']
-                        media_files.append(f_data)
-
-        total_files = len(media_files)
-        if total_files == 0:
-            await status_msg.edit_text("❌ Is folder me koi compatible files nahi mili.")
-            return
-
-        await status_msg.edit_text(f"📊 **Total Files Found:** {total_files}\n🚀 Extraction shuru ho raha hai...")
         success_count = 0
         
-        for index, file in enumerate(media_files, start=1):
-            file_name = file.get('name', f"File_{index}")
-            await status_msg.edit_text(f"📥 **Downloading & Sending:** {index}/{total_files}\n🔹 `{file_name}`")
+        # Folder scan karke files bhejna
+        for root, _, files in os.walk(download_dir):
+            for file_name in files:
+                if file_name.lower().endswith(media_exts):
+                    file_path = os.path.join(root, file_name)
+                    
+                    await status_msg.edit_text(f"📤 Uploading to Telegram:\n🔹 `{file_name}`")
+                    
+                    try:
+                        with open(file_path, 'rb') as doc:
+                            await update.message.reply_document(document=doc, filename=file_name)
+                        success_count += 1
+                    except Exception as e:
+                        print(f"Error sending file {file_name}: {e}")
+        
+        if success_count > 0:
+            await update.message.reply_text(f"🏁 **Extraction Complete!**\nTotal {success_count} files aapko bhej di gayi hain.")
+        else:
+            await status_msg.edit_text("❌ Is MEGA folder me koi media files (.mp4, .jpg, etc.) nahi mili.")
             
-            try:
-                # Execution in thread pool to prevent blocking telegram polling loop
-                file_path = await loop.run_in_executor(None, m.download_file_by_link, processed_url, file)
-                
-                # Check agar default path par nahi mili toh system check karega
-                if not file_path or not os.path.exists(file_path):
-                    if os.path.exists(file_name):
-                        file_path = file_name
-
-                if file_path and os.path.exists(file_path):
-                    with open(file_path, 'rb') as doc:
-                        await update.message.reply_document(document=doc, filename=file_name)
-                    os.remove(file_path)
-                    success_count += 1
-            except Exception as fe:
-                print(f"Skipping corrupt file {file_name}: {fe}")
-                continue
-
-        await update.message.reply_text(f"🏁 **Extraction Complete!**\nTotal {success_count} files successfully bhej di gayi hain.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Extraction Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Server Error: {str(e)}")
+    finally:
+        # Server par kachra jama na ho isliye temporary files delete karna
+        shutil.rmtree(download_dir, ignore_errors=True)
 
 # --- Main Boot ---
 def main():
@@ -172,7 +160,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_click))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("Bot is successfully running on Railway...")
+    print("Bot is successfully running on Railway with Megatools engine...")
     application.run_polling()
 
 if __name__ == '__main__':
