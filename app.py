@@ -1,182 +1,100 @@
 import os
-import sys
-import logging
 import asyncio
-import shutil
-import random
-import re
-from pyrogram import Client, filters
-from pyrogram.types import Message
+import collections
+from mega import Mega
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- LOGGING SETUP ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
 
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+approved_users = set([ADMIN_ID]) if ADMIN_ID else set()
+pending_approvals = {}
+extraction_queue = collections.deque()
+is_processing = False
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    logger.critical("❌ CRITICAL ERROR: Variables missing in GitHub Secrets!")
-    sys.exit(1)
+mega = Mega()
+m = mega.login()
 
-bot = Client("MegaFastExtractor", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-IS_PROCESSING = False
-CURRENT_PROCESS = {}
-VALID_MEDIA = ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.jpg', '.jpeg', '.png')
-
-async def safe_edit(message: Message, text: str):
-    try:
-        rand_suffix = f"\n⏱️ Sync ID: [{random.randint(1000, 9999)}]"
-        await message.edit_text(text + rand_suffix)
-    except Exception as e:
-        logger.warning(f"Ignored edit error: {e}")
-
-@bot.on_message(filters.command("start"))
-async def start_command(client, message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    await message.reply_text(
-        "🎬 **GitHub Actions Megatools Hybrid Engine Live!**\n\n"
-        "Send me any Mega Folder Link or Single File Link. I will download it instantly!\n"
-        "🛑 Use **/cancel** to stop current download loop."
-    )
-
-@bot.on_message(filters.command("cancel"))
-async def cancel_command(client, message: Message):
-    user_id = message.from_user.id
-    if user_id == ADMIN_ID:
-        CURRENT_PROCESS[user_id] = True
-        await message.reply_text("🛑 **Stopping the active stream loop safely...**")
-
-@bot.on_message(filters.text & ~filters.command(["start", "cancel"]))
-async def handle_mega_link(client, message: Message):
-    global IS_PROCESSING
-    user_id = message.from_user.id
-    
-    if user_id != ADMIN_ID: return
-    
-    # Extract clean URL (removes extra text/spaces)
-    urls = re.findall(r'(https?://mega\.nz/[^\s]+)', message.text)
-    if not urls:
-        return await message.reply_text("❌ No valid mega.nz link found in your message.")
-        
-    url = urls[0].strip()
-        
-    if IS_PROCESSING:
-        return await message.reply_text("⚠️ **Another task is running.** Please wait or use /cancel.")
-
-    status_msg = await message.reply_text("⚡ **Analyzing Link Type (Folder/File)...**")
-    IS_PROCESSING = True
-    
-    try:
-        await process_one_by_one(client, message, url, status_msg)
-    except Exception as e:
-        logger.error(f"Global Error: {e}")
-    finally:
-        IS_PROCESSING = False
-
-async def process_one_by_one(client, message, url, status_msg):
-    user_id = message.from_user.id
-    CURRENT_PROCESS[user_id] = False
-    
-    base_dir = f"/tmp/mega_stream_{message.id}"
-    os.makedirs(base_dir, exist_ok=True)
-    
-    target_files = []
-    is_folder = False
-
-    # Check if it's a folder or file link
-    if "/folder/" in url or "/#" in url and not url.count("/") == 4:
-        is_folder = True
-
-    await safe_edit(status_msg, "🔍 **Streaming Mega Structure Tree Data...**")
-    
-    if is_folder:
-        # Folder processing
-        cmd_find = ["megals", "--export", url]
-        process_find = await asyncio.create_subprocess_exec(
-            *cmd_find, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await process_find.communicate()
-        all_elements = stdout.decode('utf-8', errors='ignore').split('\n')
-        
-        for line in all_elements:
-            line = line.strip()
-            if line and any(line.lower().endswith(ext) for ext in VALID_MEDIA):
-                target_files.append(line)
-    else:
-        # Single File processing directly
-        target_files.append(url)
-            
-    total_files = len(target_files)
-    if total_files == 0:
-        await safe_edit(status_msg, "❌ **No supported files found or link format is unsupported.**")
-        if os.path.exists(base_dir): shutil.rmtree(base_dir)
+async def process_queue(context: ContextTypes.DEFAULT_TYPE):
+    global is_processing
+    if is_processing or not extraction_queue:
         return
-        
-    await safe_edit(status_msg, f"📦 **Link Parsed Successfully!**\nFound `{total_files}` items. Initializing Sequence Download...")
-    
-    for index, remote_file_path in enumerate(target_files, start=1):
-        if CURRENT_PROCESS.get(user_id, False):
-            await safe_edit(status_msg, "🛑 **Process cancelled by user.**")
-            break
-            
-        clean_file_name = remote_file_path.split('/')[-1] if '/' in remote_file_path else f"File_{index}"
-        if len(clean_file_name) > 60:  # If it's a raw URL link instead of exported path
-            clean_file_name = f"Media_File_{index}"
 
-        await safe_edit(
-            status_msg,
-            f"📥 **Downloading ({index}/{total_files}):**\n"
-            f"`{clean_file_name}`\n\n"
-            f"Status: Fetching block from Mega Cloud... ⚡"
-        )
-        
-        # Download action
-        process_dl = await asyncio.create_subprocess_exec(
-            "megadl", "--path", base_dir, remote_file_path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await process_dl.communicate()
-        
-        local_file_path = None
-        actual_name = clean_file_name
-        for root, _, files in os.walk(base_dir):
-            for f in files:
-                local_file_path = os.path.join(root, f)
-                actual_name = f
-                break
-        
-        if local_file_path and os.path.exists(local_file_path):
-            await safe_edit(
-                status_msg,
-                f"📤 **Uploading ({index}/{total_files}):**\n"
-                f"`{actual_name}`\n\n"
-                f"Status: Injecting file into Telegram Network..."
-            )
-            
-            try:
-                if actual_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    await message.reply_photo(photo=local_file_path, caption=f"📸 `{actual_name}`")
-                else:
-                    await message.reply_video(video=local_file_path, caption=f"🎥 File: `{index}/{total_files}`\n📝 `{actual_name}`")
-            except Exception as upload_err:
-                logger.error(f"Upload failed: {upload_err}")
-            
-            # Flush after single transmission
-            os.remove(local_file_path)
+    is_processing = True
+    user_id, mega_link, update = extraction_queue.popleft()
+    await update.message.reply_text("⏳ Aapka number aa gaya hai! Extraction start ho raha hai...")
+    await extract_mega_folder(mega_link, update, context)
+    is_processing = False
+    asyncio.create_task(process_queue(context))
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id in approved_users:
+        await update.message.reply_text(f"👋 Hello {user.first_name}! Main taiyar hoon. Mujhe MEGA folder ka link bhejo.")
+    else:
+        pending_approvals[user.id] = update
+        await update.message.reply_text("🔒 Aapko is bot ko use karne ki permission nahi hai. Admin ko approval request bhej di gayi hai.")
+        if ADMIN_ID:
+            await context.bot.send_message(chat_id=ADMIN_ID, text=f"👤 **New User Request:**\nName: {user.first_name}\nID: `{user.id}`\n\nApprove: `/approve {user.id}`")
+
+async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        user_id = int(context.args[0])
+        approved_users.add(user_id)
+        await update.message.reply_text(f"✅ User {user_id} approved.")
+        if user_id in pending_approvals:
+            await context.bot.send_message(chat_id=user_id, text="🎉 Admin ne approve kar diya!")
+            del pending_approvals[user_id]
+    except:
+        await update.message.reply_text("❌ Format: `/approve USER_ID`")
+
+async def handle_message(update: Update, update_context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in approved_users: return
+    text = update.message.text
+    if "mega.nz" in text:
+        extraction_queue.append((user_id, text, update))
+        if is_processing or len(extraction_queue) > 1:
+            await update.message.reply_text(f"⏳ Queue Position #{len(extraction_queue) - 1}")
         else:
-            logger.warning(f"Skipped item index: {index}")
-            
-    await safe_edit(status_msg, "✅ **All files extracted and processed successfully!** Storage completely flushed.")
-    if os.path.exists(base_dir): shutil.rmtree(base_dir)
+            asyncio.create_task(process_queue(update_context))
+    else:
+        await update.message.reply_text("⚠️ Valid MEGA link bhejo.")
 
-if __name__ == "__main__":
-    bot.run()
-    
+async def extract_mega_folder(url: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await update.message.reply_text("🔍 Files check ho rahi hain...")
+    try:
+        loop = asyncio.get_running_loop()
+        files = await loop.run_in_executor(None, m.get_files_from_link, url)
+        media_exts = ('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.jpg', '.jpeg', '.png')
+        media_files = [f for f in files.values() if str(f['name']).lower().endswith(media_exts)]
+        
+        if not media_files:
+            await status_msg.edit_text("❌ No media files found.")
+            return
+
+        await status_msg.edit_text(f"📊 Total Files: {len(media_files)}. Extracting...")
+        for index, file in enumerate(media_files, start=1):
+            try:
+                file_path = await loop.run_in_executor(None, m.download_file_by_link, url, file)
+                if os.path.exists(file_path):
+                    with open(file_path, 'rb') as doc:
+                        await update.message.reply_document(document=doc, filename=file['name'])
+                    os.remove(file_path)
+            except: continue
+        await update.message.reply_text("🏁 Complete!")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
+
+def main():
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("approve", approve_user))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Bot is alive on Render...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
