@@ -93,8 +93,9 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("approve", approve_user))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot is alive on Render...")
+    print("Bot is starting on Railway...")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
+    
