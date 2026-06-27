@@ -14,12 +14,7 @@ approved_users = set([ADMIN_ID]) if ADMIN_ID else set()
 all_users = set() 
 extraction_queue = collections.deque()
 
-# --- State Management ---
-bot_state = {
-    "process": None,
-    "is_cancelled": False,
-    "is_processing": False
-}
+bot_state = {"process": None, "is_cancelled": False, "is_processing": False}
 
 def format_mega_url(url: str) -> str:
     url = url.strip()
@@ -28,178 +23,91 @@ def format_mega_url(url: str) -> str:
         return f"https://mega.nz/#F!{parts[0]}!{parts[1]}"
     return url
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    msg = " ".join(context.args)
-    if not msg:
-        await update.message.reply_text("❌ Format: /broadcast <message>")
-        return
-    count = 0
-    for user_id in all_users:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=f"📢 **Admin Message:**\n\n{msg}")
-            count += 1
-        except: continue
-    await update.message.reply_text(f"✅ Message {count} users ko bhej diya gaya hai.")
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_state["is_processing"]:
-        await update.message.reply_text("⚠️ Koi active task nahi chal raha hai.")
-        return
-        
     bot_state["is_cancelled"] = True 
     if bot_state["process"]:
-        try:
-            bot_state["process"].kill() 
-        except:
-            pass
-    await update.message.reply_text("🛑 Process ko rokne ki request bhej di gayi hai...")
+        try: bot_state["process"].kill()
+        except: pass
+    await update.message.reply_text("🛑 Cancel signal sent.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     all_users.add(user.id)
     if user.id in approved_users:
-        await update.message.reply_text(f"👋 Hello {user.first_name}! send megafolder link.")
+        await update.message.reply_text("👋 Link bhejo, main ready hoon.")
     else:
-        await update.message.reply_text("🔒 Aap approved nahi hain. Request bhej di gayi hai dm for joining @uflowx.")
+        await update.message.reply_text("🔒 Not approved.")
         if ADMIN_ID:
             keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user.id}")]]
-            await context.bot.send_message(ADMIN_ID, f"👤 User: {user.first_name}\nID: `{user.id}`", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if update.effective_user.id != ADMIN_ID: return
-    data = query.data
-    if data.startswith("approve_"):
-        user_id = int(data.split("_")[1])
-        approved_users.add(user_id)
-        await query.edit_message_text(text=f"✅ User `{user_id}` approved!")
+            await context.bot.send_message(ADMIN_ID, f"User: {user.id}", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in approved_users: return
+    if update.effective_user.id not in approved_users: return
     text = update.message.text.strip()
-    
     if "mega.nz" in text:
-        extraction_queue.append((user_id, text, update))
+        extraction_queue.append((update.effective_user.id, text, update))
         if not bot_state["is_processing"]: 
-            asyncio.create_task(process_queue(context)) 
-        else: 
-            await update.message.reply_text(f"⏳ Abhi ek extraction chal raha hai. Aapko queue me daal diya hai (Position: {len(extraction_queue)}).")
-    else:
-        await update.message.reply_text("⚠️ Valid MEGA link bhejo.")
+            asyncio.create_task(process_queue(context))
+        else:
+            await update.message.reply_text("⏳ Queue mein add kar diya gaya hai.")
 
 async def process_queue(context: ContextTypes.DEFAULT_TYPE):
     bot_state["is_processing"] = True
-    
     while extraction_queue:
-        bot_state["is_cancelled"] = False
         user_id, mega_link, update = extraction_queue.popleft()
-        
         try:
-            status_msg = await context.bot.send_message(chat_id=user_id, text="⏳ Extraction start ho raha hai... (/cancel dabayein rokne ke liye)")
-            
-            clean_url = format_mega_url(mega_link)
+            status_msg = await context.bot.send_message(user_id, "⏳ Starting...")
             task_id = str(uuid.uuid4())
             download_dir = f"./downloads/{task_id}"
             os.makedirs(download_dir, exist_ok=True)
             
-            # --- PHASE 1: DOWNLOAD ---
-            bot_state["process"] = await asyncio.create_subprocess_exec(
-                "megatools", "dl", "--path", download_dir, clean_url,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await bot_state["process"].communicate()
+            # Download
+            proc = await asyncio.create_subprocess_exec("megatools", "dl", "--path", download_dir, format_mega_url(mega_link))
+            bot_state["process"] = proc
+            await proc.communicate()
             
-            if bot_state["is_cancelled"]:
-                await status_msg.edit_text("🛑 Extraction Cancel kar diya gaya.")
-                continue
-                
-            if bot_state["process"].returncode == 0:
-                await status_msg.edit_text("📂 Download complete! Uploading to Telegram...")
-                
-                # --- PHASE 2: UPLOAD (With Auto-Splitter) ---
+            if proc.returncode == 0:
                 for root, _, files in os.walk(download_dir):
                     for file in files:
                         if bot_state["is_cancelled"]: break
-                            
-                        file_path = os.path.join(root, file)
-                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        path = os.path.join(root, file)
+                        size = os.path.getsize(path) / (1024 * 1024)
                         
-                        # Agar file 50MB se badi hai, toh usko split karenge
-                        if file_size_mb > 49.5: 
-                            await status_msg.edit_text(f"✂️ `{file}` badi file hai ({file_size_mb:.1f}MB). 49MB ke parts me split kar raha hoon...")
-                            
-                            chunk_size = 49 * 1024 * 1024 # 49MB exact
+                        if size > 49:
                             part_num = 1
-                            
-                            with open(file_path, 'rb') as f:
-                                while True:
-                                    if bot_state["is_cancelled"]: break
-                                    
-                                    chunk = f.read(chunk_size)
-                                    if not chunk: break
-                                    
-                                    # File ko .001, .002 format me save karega
-                                    part_name_only = f"{file}.{part_num:03d}"
-                                    part_filename = os.path.join(root, part_name_only)
-                                    
-                                    with open(part_filename, 'wb') as part_file:
-                                        part_file.write(chunk)
-                                        
-                                    await status_msg.edit_text(f"📤 Uploading Part {part_num}: `{part_name_only}`")
-                                    
-                                    try:
-                                        with open(part_filename, 'rb') as doc:
-                                            await context.bot.send_document(chat_id=user_id, document=doc, read_timeout=120, write_timeout=120)
-                                    except Exception as e:
-                                        await context.bot.send_message(chat_id=user_id, text=f"❌ `{part_name_only}` me error: {str(e)}")
-                                        
-                                    os.remove(part_filename) # Part upload hone ke baad delete
-                                    part_num += 1
-                                    await asyncio.sleep(1)
-                            continue # Splitting khatam, ab next main file par jao
-                            
-                        # Agar file 50MB se choti hai, toh direct upload
-                        await status_msg.edit_text(f"📤 Uploading: `{file}`")
-                        try:
-                            with open(file_path, 'rb') as doc:
-                                await context.bot.send_document(chat_id=user_id, document=doc, read_timeout=120, write_timeout=120)
-                        except Exception as e:
-                            await context.bot.send_message(chat_id=user_id, text=f"❌ `{file}` bhejte waqt error aaya: {str(e)}")
-                        
-                        await asyncio.sleep(1) 
-                        
-                if bot_state["is_cancelled"]:
-                    await context.bot.send_message(chat_id=user_id, text="🛑 Upload process cancel kar diya gaya.")
-                else:
-                    await context.bot.send_message(chat_id=user_id, text="✅ Sabhi files successfully bhej di gayi hain!")
+                            with open(path, 'rb') as f:
+                                while chunk := f.read(49 * 1024 * 1024):
+                                    part = f"{path}.{part_num:03d}"
+                                    with open(part, 'wb') as p: p.write(chunk)
+                                    await context.bot.send_document(user_id, open(part, 'rb'), read_timeout=300, write_timeout=300)
+                                    os.remove(part); part_num += 1
+                        else:
+                            await context.bot.send_document(user_id, open(path, 'rb'), read_timeout=300, write_timeout=300)
             else:
-                await status_msg.edit_text("❌ Download failed. Link check karein.")
-                
-        except Exception as global_err:
-            await context.bot.send_message(chat_id=user_id, text=f"💥 System Error: {str(global_err)}")
-            
+                await context.bot.send_message(user_id, "❌ Download failed.")
+        except Exception as e:
+            await context.bot.send_message(user_id, f"Error: {str(e)}")
         finally:
-            bot_state["process"] = None
             shutil.rmtree(download_dir, ignore_errors=True)
-            await asyncio.sleep(1)
-            
-    bot_state["is_processing"] = False 
+    bot_state["is_processing"] = False
 
 def main():
-    request = HTTPXRequest(connect_timeout=60.0, read_timeout=180.0, write_timeout=180.0)
-    application = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(True).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("broadcast", broadcast))
-    application.add_handler(CallbackQueryHandler(button_click))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("Bot is running with Auto-Splitter Jugad...")
-    application.run_polling(drop_pending_updates=True)
+    while True: # Infinite loop for 24x7 uptime
+        try:
+            print("Bot starting...")
+            request = HTTPXRequest(connect_timeout=60, read_timeout=300, write_timeout=300)
+            app = Application.builder().token(BOT_TOKEN).request(request).build()
+            
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("cancel", cancel))
+            app.add_handler(MessageHandler(filters.TEXT, handle_message))
+            app.add_handler(CallbackQueryHandler(lambda u, c: (approved_users.add(int(u.callback_query.data.split('_')[1])), u.callback_query.edit_message_text("Approved!"))))
+            
+            app.run_polling()
+        except Exception as e:
+            print(f"Restarting in 5s due to: {e}")
+            asyncio.sleep(5)
 
 if __name__ == '__main__':
     main()
+    
