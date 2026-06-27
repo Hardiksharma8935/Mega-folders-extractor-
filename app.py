@@ -86,7 +86,6 @@ async def handle_message(update: Update, update_context: ContextTypes.DEFAULT_TY
 # --- Naya Smart URL Fixer ---
 def format_mega_url(url: str) -> str:
     url = url.strip()
-    # Naye /folder/ format ko purane format me badalta hai taaki megatools samajh sake
     if '/folder/' in url and '#' in url:
         parts = url.split('/folder/')[1].split('#')
         return f"https://mega.nz/#F!{parts[0]}!{parts[1]}"
@@ -107,7 +106,6 @@ async def extract_mega_folder(url: str, update: Update, context: ContextTypes.DE
     try:
         await status_msg.edit_text("⏳ Server folder download kar raha hai... (Isme file ke size ke hisab se waqt lag sakta hai)")
         
-        # Railway ke asli Linux engine (megatools) ka istemal
         process = await asyncio.create_subprocess_exec(
             "megatools", "dl", "--path", download_dir, clean_url,
             stdout=asyncio.subprocess.PIPE,
@@ -122,11 +120,9 @@ async def extract_mega_folder(url: str, update: Update, context: ContextTypes.DE
         
         await status_msg.edit_text("📂 Download complete! Ab ek-ek karke Telegram par bhej raha hoon...")
         
-        # Supported formats
         media_exts = ('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.jpg', '.jpeg', '.png', '.pdf', '.zip')
         success_count = 0
         
-        # Folder scan karke files bhejna
         for root, _, files in os.walk(download_dir):
             for file_name in files:
                 if file_name.lower().endswith(media_exts):
@@ -149,7 +145,6 @@ async def extract_mega_folder(url: str, update: Update, context: ContextTypes.DE
     except Exception as e:
         await status_msg.edit_text(f"❌ Server Error: {str(e)}")
     finally:
-        # Server par kachra jama na ho isliye temporary files delete karna
         shutil.rmtree(download_dir, ignore_errors=True)
 
 # --- Main Boot ---
