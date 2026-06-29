@@ -2,8 +2,11 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Server par megatools install karne ki command
-RUN apt-get update && apt-get install -y megatools && rm -rf /var/lib/apt/lists/*
+# megatools aur dusre tools install karna (ffmpeg add kiya gaya hai safety ke liye)
+RUN apt-get update && apt-get install -y \
+    megatools \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
