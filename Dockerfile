@@ -2,7 +2,6 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# megatools aur dusre tools install karna (ffmpeg add kiya gaya hai safety ke liye)
 RUN apt-get update && apt-get install -y \
     megatools \
     ffmpeg \
