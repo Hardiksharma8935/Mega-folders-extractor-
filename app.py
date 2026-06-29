@@ -3,6 +3,7 @@ import asyncio
 import collections
 import shutil
 import uuid
+import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
@@ -14,12 +15,19 @@ approved_users = set([ADMIN_ID]) if ADMIN_ID else set()
 all_users = set() 
 extraction_queue = collections.deque()
 
-# --- State Management ---
 bot_state = {
-    "process": None,
     "is_cancelled": False,
     "is_processing": False
 }
+
+# --- Anti-Ban: Auto Delete Message Task ---
+async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: int = 600):
+    """10 minute (600 seconds) baad Telegram se message automatically delete kar dega"""
+    await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass # Agar user ne pehle hi delete kar diya ho toh ignore karo
 
 def format_mega_url(url: str) -> str:
     url = url.strip()
@@ -28,43 +36,41 @@ def format_mega_url(url: str) -> str:
         return f"https://mega.nz/#F!{parts[0]}!{parts[1]}"
     return url
 
+async def run_cmd(cmd):
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = await proc.communicate()
+    return stdout.decode().strip(), stderr.decode().strip()
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     msg = " ".join(context.args)
-    if not msg:
-        await update.message.reply_text("❌ Format: /broadcast <message>")
-        return
-    count = 0
+    if not msg: return
     for user_id in all_users:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=f"📢 **Admin Message:**\n\n{msg}")
-            count += 1
+        try: await context.bot.send_message(chat_id=user_id, text=f"📢 {msg}")
         except: continue
-    await update.message.reply_text(f"✅ Message {count} users ko bhej diya gaya hai.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_state["is_processing"]:
-        await update.message.reply_text("⚠️ Koi active task nahi chal raha hai.")
-        return
-        
+    if update.effective_user.id not in approved_users: return
+    if not bot_state["is_processing"]: return
     bot_state["is_cancelled"] = True 
-    if bot_state["process"]:
-        try:
-            bot_state["process"].kill() 
-        except:
-            pass
     await update.message.reply_text("🛑 Process ko rokne ki request bhej di gayi hai...")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    all_users.add(user.id)
-    if user.id in approved_users:
-        await update.message.reply_text(f"👋 Hello {user.first_name}! send megafolder link.")
-    else:
-        await update.message.reply_text("🔒 Aap approved nahi hain. Request bhej di gayi hai dm for joining @uflowx.")
+    user_id = update.effective_user.id
+    all_users.add(user_id)
+    
+    # STEALTH MODE: Agar user approved nahi hai, toh chup raho. Reply mat karo.
+    if user_id not in approved_users:
+        # Admin ko alert bhej sakte hain silently
         if ADMIN_ID:
-            keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user.id}")]]
-            await context.bot.send_message(ADMIN_ID, f"👤 User: {user.first_name}\nID: `{user.id}`", reply_markup=InlineKeyboardMarkup(keyboard))
+            keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}")]]
+            await context.bot.send_message(ADMIN_ID, f"👤 Naya User Aaya: {update.effective_user.first_name}\nID: `{user_id}`", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Sirf approved users ko reply jayega
+    sent_msg = await update.message.reply_text(f"👋 Hello {update.effective_user.first_name}! Send MEGA link.")
+    # Welcome message ko bhi 2 min baad delete kar do safai ke liye
+    asyncio.create_task(auto_delete_message(context, user_id, sent_msg.message_id, 120))
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -78,94 +84,115 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in approved_users: return
-    text = update.message.text.strip()
     
+    # STEALTH MODE: Unapproved messages ko silently ignore karo
+    if user_id not in approved_users: return
+    
+    text = update.message.text.strip()
     if "mega.nz" in text:
-        extraction_queue.append((user_id, text, update))
+        extraction_queue.append((user_id, text))
         if not bot_state["is_processing"]: 
             asyncio.create_task(process_queue(context)) 
         else: 
-            await update.message.reply_text(f"⏳ Abhi ek extraction chal raha hai. Aapko queue me daal diya hai (Position: {len(extraction_queue)}).")
+            msg = await update.message.reply_text(f"⏳ Queue position: {len(extraction_queue)}.")
+            asyncio.create_task(auto_delete_message(context, user_id, msg.message_id, 30))
     else:
-        await update.message.reply_text("⚠️ Valid MEGA link bhejo.")
+        msg = await update.message.reply_text("⚠️ Valid MEGA link bhejo.")
+        asyncio.create_task(auto_delete_message(context, user_id, msg.message_id, 30))
 
 async def process_queue(context: ContextTypes.DEFAULT_TYPE):
     bot_state["is_processing"] = True
     
     while extraction_queue:
         bot_state["is_cancelled"] = False
-        user_id, mega_link, update = extraction_queue.popleft()
+        user_id, mega_link = extraction_queue.popleft()
         
         try:
-            status_msg = await context.bot.send_message(chat_id=user_id, text="⏳ Extraction start ho raha hai... (/cancel dabayein rokne ke liye)")
-            
+            status_msg = await context.bot.send_message(chat_id=user_id, text="🔍 Link scan kar raha hoon...")
             clean_url = format_mega_url(mega_link)
-            task_id = str(uuid.uuid4())
-            download_dir = f"./downloads/{task_id}"
-            os.makedirs(download_dir, exist_ok=True)
             
-            # --- PHASE 1: DOWNLOAD ---
-            bot_state["process"] = await asyncio.create_subprocess_exec(
-                "megatools", "dl", "--path", download_dir, clean_url,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await bot_state["process"].communicate()
+            # --- PHASE 1: FOLDER SCAN (One-by-One Method for 90GB+ Support) ---
+            stdout, stderr = await run_cmd(["megals", clean_url])
+            files = [f for f in stdout.split('\n') if f.strip()]
             
-            if bot_state["is_cancelled"]:
-                await status_msg.edit_text("🛑 Extraction Cancel kar diya gaya.")
-                continue
+            if not files:
+                # Agar direct file link hai
+                files = [clean_url]
+            
+            await status_msg.edit_text(f"✅ {len(files)} items found. Downloading and Uploading one by one...")
+
+            for i, file_path in enumerate(files, 1):
+                if bot_state["is_cancelled"]: break
                 
-            if bot_state["process"].returncode == 0:
-                await status_msg.edit_text("📂 Download complete! Uploading to Telegram...")
+                await status_msg.edit_text(f"⬇️ Downloading ({i}/{len(files)})...")
+                task_id = str(uuid.uuid4())
+                download_dir = f"./downloads/{task_id}"
+                os.makedirs(download_dir, exist_ok=True)
                 
-                # --- PHASE 2: UPLOAD (With Crash Protection) ---
-                for root, _, files in os.walk(download_dir):
-                    for file in files:
-                        if bot_state["is_cancelled"]: break
+                # Download single file
+                await run_cmd(["megatools", "dl", "--path", download_dir, file_path])
+                
+                downloaded_files = os.listdir(download_dir)
+                if not downloaded_files:
+                    shutil.rmtree(download_dir, ignore_errors=True)
+                    continue
+                    
+                actual_file_name = downloaded_files[0]
+                full_file_path = os.path.join(download_dir, actual_file_name)
+                file_size_mb = os.path.getsize(full_file_path) / (1024 * 1024)
+                
+                # --- PHASE 2: UPLOAD & AUTO-DELETE ---
+                await status_msg.edit_text(f"📤 Uploading: `{actual_file_name}`\n(Auto-delete in 10 mins)")
+                
+                # Split logic for > 50MB files to bypass Telegram limits
+                if file_size_mb > 49.5:
+                    with open(full_file_path, 'rb') as f:
+                        part_num = 1
+                        while True:
+                            if bot_state["is_cancelled"]: break
+                            chunk = f.read(49 * 1024 * 1024)
+                            if not chunk: break
                             
-                        file_path = os.path.join(root, file)
-                        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                        
-                        # 50MB limit check (Ye bot ko 413 error se bachayega)
-                        if file_size_mb > 49.5: 
-                            await context.bot.send_message(chat_id=user_id, text=f"⚠️ Skipped `{file}`\n❌ Telegram bots 50MB se badi file nahi bhej sakte (Ye {file_size_mb:.1f}MB ki hai).")
-                            continue
+                            part_name = f"{full_file_path}.{part_num:03d}"
+                            with open(part_name, 'wb') as p: p.write(chunk)
                             
-                        await status_msg.edit_text(f"📤 Uploading: `{file}`")
-                        
-                        # Upload try-except block (Ye bot ko freeze hone se bachayega)
-                        try:
-                            with open(file_path, 'rb') as doc:
-                                await context.bot.send_document(chat_id=user_id, document=doc, read_timeout=120, write_timeout=120)
-                        except Exception as e:
-                            await context.bot.send_message(chat_id=user_id, text=f"❌ `{file}` bhejte waqt error aaya: {str(e)}")
-                        
-                        # Server ko saans lene ka time do taaki doosre users ignore na hon
-                        await asyncio.sleep(1) 
-                        
-                if bot_state["is_cancelled"]:
-                    await context.bot.send_message(chat_id=user_id, text="🛑 Upload process cancel kar diya gaya.")
+                            try:
+                                sent_doc = await context.bot.send_document(chat_id=user_id, document=open(part_name, 'rb'), read_timeout=180, write_timeout=180)
+                                # 10 MINUTE AUTO-DELETE
+                                asyncio.create_task(auto_delete_message(context, user_id, sent_doc.message_id, 600))
+                            except Exception as e:
+                                pass
+                                
+                            os.remove(part_name)
+                            part_num += 1
                 else:
-                    await context.bot.send_message(chat_id=user_id, text="✅ Sabhi files successfully bhej di gayi hain!")
-            else:
-                await status_msg.edit_text("❌ Download failed. Link check karein.")
+                    # Upload standard file (<50MB)
+                    try:
+                        sent_doc = await context.bot.send_document(chat_id=user_id, document=open(full_file_path, 'rb'), read_timeout=180, write_timeout=180)
+                        # 10 MINUTE AUTO-DELETE
+                        asyncio.create_task(auto_delete_message(context, user_id, sent_doc.message_id, 600))
+                    except Exception as e:
+                        pass
                 
-        except Exception as global_err:
-            await context.bot.send_message(chat_id=user_id, text=f"💥 System Error: {str(global_err)}")
+                # Server se file turant delete taaki storage full na ho
+                shutil.rmtree(download_dir, ignore_errors=True)
+                await asyncio.sleep(1) # Prevent flood waits
+
+            if bot_state["is_cancelled"]:
+                await status_msg.edit_text("🛑 Process Cancelled.")
+            else:
+                await status_msg.edit_text("✅ All files processed!\n(Files will automatically disappear from chat in 10 mins for safety)")
             
-        finally:
-            # Ye block hamesha chalega chahe kuch bhi error ho (Preventing Freeze)
-            bot_state["process"] = None
-            shutil.rmtree(download_dir, ignore_errors=True)
-            await asyncio.sleep(1)
+            # Status message ko bhi 1 minute baad uda do
+            asyncio.create_task(auto_delete_message(context, user_id, status_msg.message_id, 60))
+                
+        except Exception as e:
+            pass # Stealth mode: Don't spam errors
             
-    # Jab queue khali ho jaye tabhi bot free hoga
     bot_state["is_processing"] = False 
 
 def main():
-    # Timeout limits aur badha diye hain heavy files ke liye
-    request = HTTPXRequest(connect_timeout=60.0, read_timeout=180.0, write_timeout=180.0)
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=300.0, write_timeout=300.0)
     application = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(True).build()
     
     application.add_handler(CommandHandler("start", start))
@@ -174,7 +201,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_click))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("Bot is running with Crash Protection v3...")
+    print("Bot is running in STEALTH & AUTO-DELETE Mode...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
